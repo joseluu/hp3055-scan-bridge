@@ -106,16 +106,60 @@ Sequence observee (`SetRequest`, OID sous prefixe `.1.3.6.1.4.1.11.2.3.9.4.2.1.2
 
 | OID (suffixe) | Type       | Valeur observee           | Role probable |
 |---|---|---|---|
-| `.3.0`  | INTEGER    | 8                         | ? (qualite/param scan) |
-| `.2.0`  | Hex-STRING | `00 96 00 00 00 96 00 00` | XRes=150, YRes=150 (2x uint32 BE, 16 bits utiles) |
+| `.3.0`  | INTEGER    | **8 = niveaux de gris, 24 = couleur** (confirme sur 6 essais croises, voir tableau ci-dessous) | **mode du capteur (le seul vrai selecteur)** |
+| `.2.0`  | Hex-STRING | `XX XX 00 00` repete 2x (XRes puis YRes, little-endian 16 bits utiles) | **resolution en DPI** : `C8 00...`x2 = 200dpi, `2C 01...`x2 = 300dpi, `96 00...`x2 = 150dpi |
 | `.16.0` | INTEGER    | 0                         | ? |
-| `.17.0` | INTEGER    | 2480 (ou 2560 au repos)   | largeur en pixels |
-| `.50.0` | INTEGER    | 8409                      | taille/buffer attendu |
+| `.17.0` | INTEGER    | largeur en pixels, varie avec `.2.0` (2478-2480 a 200/300dpi pour du A4) | largeur en pixels, deduite de la resolution (~ DPI x 8.27") |
+| `.50.0` | INTEGER    | 8409 (gris) / 8448 (couleur 300dpi) / 8409 (couleur 200dpi) | taille/buffer attendu, varie avec mode+resolution |
 | `.76.0` | INTEGER    | 0                         | ? |
-| `.4.0`  | INTEGER    | 6 (2 au repos)            | format/mode (6 = JPEG couleur ?) |
+| `.4.0`  | INTEGER    | **toujours 6** dans tous nos essais (gris, couleur, 150/200/300dpi) | **PAS le selecteur de mode malgre l'hypothese initiale** — role encore inconnu |
 | `.53.0` | Hex-STRING | `33 33 02 00`             | ? |
 | `.54.0` | INTEGER    | 1                         | ? (flag start-related) |
 | `.12.0` | INTEGER    | **1→2 = GO**, passe a 5 une fois l'image prete, a remettre a 1 par le client apres recuperation | **etat de la machine a etats du scan** |
+
+### Mode scan (.3.0) et resolution (.2.0/.17.0) — confirme par tests croises (2026-10-03)
+
+Six scans tests effectues depuis le vrai logiciel HP (VM), en faisant varier mode et
+resolution independamment, destination et format de sortie differents a chaque fois,
+capture reseau a chaque essai :
+
+| Test | Format sortie (PC) | `.3.0` | `.2.0`/`.17.0` (DPI deduit) | Image obtenue (verifiee) |
+|---|---|---|---|---|
+| JOSE:File | — | 24 | 150dpi, 2544px | couleur |
+| JOSE:TEST_JPG | JPG | 24 | 300dpi, 2528px | couleur (confirme par logiciel : "millions of colors" 200dpi affiche, mais .2.0 montre 300 — le logiciel demande une resolution native puis sous-echantillonne lui-meme en local) |
+| JOSE:TEST_1B (wizard A4/BW/300dpi) | TIFF | 8 | 300dpi, 2480px | **A4 BW confirme** |
+| JOSE:TEST_CO_J (couleur 200dpi A4) | JPG | 24 | 200dpi, 2478px | couleur |
+| JOSE:TEST_CO_P (memes parametres) | PDF | 24 | 200dpi, 2478px | couleur — **SNMP et flux port 8290 identiques a l'octet pres au test JPG precedent** |
+| JOSE:TEST_GR_P / TEST_GR_J (grayscale 300dpi) | PDF puis JPG | 8 | 300dpi, 2480px | **niveaux de gris confirme** (pas du noir/blanc 1-bit pur) |
+
+**Conclusions etablies :**
+- `.3.0` est le seul vrai selecteur de mode cote imprimante, et il n'a que **2 valeurs
+  possibles** : `8` et `24`. Pas de 3e valeur pour "noir et blanc" distinct de "niveaux de
+  gris" — les deux rendus (`TEST_1B` et `TEST_GR_*`) donnent exactement la meme sequence
+  SNMP (`.3.0=8`, memes autres champs). **La distinction grayscale vs BW/1-bit est donc un
+  post-traitement logiciel (seuillage) applique par le PC apres reception du JPEG en
+  niveaux de gris**, pas un reglage materiel de l'imprimante.
+- `.2.0` encode directement le DPI demande (XRes/YRes identiques, codes sur les 2 premiers
+  octets de chaque mot de 4 octets, le reste a 0), et `.17.0` est la largeur en pixels
+  coherente pour une page A4 a cette resolution. Les deux valeurs bougent ensemble et sont
+  independantes du mode (`.3.0`).
+- **Le format de sortie choisi dans le logiciel HP (JPG/PDF/TIFF/...) n'a aucune influence
+  sur le trafic reseau** : capture rigoureusement identique (SNMP et donnees port 8290)
+  entre un essai "JPG" et un essai "PDF" avec les memes reglages mode/resolution/destination.
+  L'imprimante envoie **toujours** du JPEG brut sur le port 8290 ; la conversion vers
+  PDF/TIFF/etc. est faite localement par le logiciel PC apres reception.
+- **Le niveau de compression JPEG (qualite/taille de fichier) n'est pas non plus pilote par
+  SNMP.** Deux scans consecutifs, memes reglages (gris, 300dpi, meme destination), seule la
+  compression changee dans le logiciel HP ("default" vs "smallest file size") : sequences
+  SNMP **rigoureusement identiques a l'octet pres** (seul le nonce aleatoire `.1.1.1.25.0`
+  differe, sans rapport). Pourtant le volume reellement transfere sur le port 8290 differe
+  nettement : ~99 Ko (default) vs ~83 Ko (smallest file size), soit ~16% de moins. La
+  compression est donc **decidee par l'imprimante elle-meme** (elle sait produire un JPEG
+  plus ou moins compresse) mais **pas via un des OID connus** — soit via un champ encore
+  marque "?" dans le tableau ci-dessus (candidats : `.53.0` ou `.76.0`, jamais vus varier
+  dans nos essais mais pas testes isolement pour la compression), soit via l'en-tete binaire
+  de 74 octets avant le JPEG sur le port 8290 (non decode), soit via un mecanisme totalement
+  different qu'on n'a pas encore identifie. **Non elucide — a creuser.**
 
 Il y a aussi un champ `.1.3.6.1.4.1.11.2.3.9.4.2.1.1.1.25.0` (Hex-STRING 16 octets) qui
 alterne entre zero et des valeurs a priori aleatoires plusieurs fois avant le `GO` — role non

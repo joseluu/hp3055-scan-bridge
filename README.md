@@ -13,13 +13,18 @@ detail complet (requetes exactes, OID SNMP, structure des trames).
 
 ## Comment ça marche
 
-1. Le script s'enregistre aupres de l'imprimante comme "destination" de scan (elle apparait
-   alors dans la liste du panneau).
-2. Il surveille en continu si cette destination a ete choisie et le bouton "Scan" presse.
-3. Quand c'est le cas, il envoie la sequence SNMP qui declenche reellement le moteur de scan
-   (le simple polling HTTP ne suffit pas — c'est la piece manquante qui a pris le plus de
-   temps a trouver).
-4. Il recupere l'image scannee (JPEG) sur un port TCP dedie, et la sauvegarde en PDF.
+1. Le script s'enregistre aupres de l'imprimante comme plusieurs "destinations" de scan —
+   une par profil couleur/resolution (elles apparaissent toutes dans la liste du panneau,
+   l'imprimante n'ayant pas de bouton pour choisir le mode, c'est le choix de destination qui
+   en tient lieu).
+2. Il surveille en continu si l'une de ces destinations a ete choisie et le bouton "Scan"
+   presse.
+3. Quand c'est le cas, il envoie la sequence SNMP du profil correspondant, qui declenche
+   reellement le moteur de scan (le simple polling HTTP ne suffit pas — c'est la piece
+   manquante qui a pris le plus de temps a trouver).
+4. Il recupere l'image scannee (JPEG) sur un port TCP dedie, la convertit selon le mode du
+   profil (couleur / niveaux de gris / noir-et-blanc par seuillage logiciel) et la sauvegarde
+   en PDF.
 
 ## Prerequis
 
@@ -31,38 +36,57 @@ detail complet (requetes exactes, OID SNMP, structure des trames).
 
 ## Configuration
 
-Tout se regle via variables d'environnement :
+Les parametres de connexion se reglent via variables d'environnement :
 
 | Variable | Defaut | Description |
 |---|---|---|
 | `PRINTER_IP` | `192.168.1.2` | IP de l'imprimante |
 | `HOST_ID` | `MYPC` | Doit correspondre au **nom NetBIOS reel** de la machine qui lance le script (l'imprimante semble le resoudre par NBNS avant d'accepter le scan) |
-| `DEST_DISPLAY` | `MYPC:AutoScan` | Nom affiche au panneau de l'imprimante dans la liste des destinations |
 | `OUTPUT_DIR` | `./output` | Dossier ou sont deposes les PDF generes |
 | `SNMP_COMMUNITY` | `internal` | Communaute SNMP (valeur observee sur le modele teste) |
-| `RESOLUTION_DPI` | `150` | Resolution X/Y envoyee au scanner. **Attention**, voir note ci-dessous. |
-| `WIDTH_PX` | `2480` | Largeur en pixels envoyee au scanner, doit correspondre a `RESOLUTION_DPI` |
-
-> Les valeurs par defaut de `RESOLUTION_DPI`/`WIDTH_PX` ci-dessus sont celles qui ont servi
-> aux tout premiers tests reussis, mais elles sont **incoherentes entre elles** (150dpi
-> declare avec une largeur qui correspond a du A4 a 300dpi) — repere apres coup, jamais
-> recorrige/teste. Essayer `RESOLUTION_DPI=300` (coherent avec `WIDTH_PX=2480`, du A4 a
-> 300dpi) ou `RESOLUTION_DPI=150` avec `WIDTH_PX=1240` (A4 a 150dpi). Voir `PROTOCOL.md`.
 
 ```bash
 export PRINTER_IP=192.168.1.50
 export HOST_ID=$(hostname | tr a-z A-Z)
-export DEST_DISPLAY="$(hostname):Scan"
 export OUTPUT_DIR=/srv/scans
 python3 hp3055_scan_bridge.py
 ```
+
+### Profils de scan (couleur/resolution/mode)
+
+Le script enregistre **plusieurs destinations**, une par profil defini dans la constante
+`PROFILES` en tete du script — le panneau de l'imprimante n'ayant pas de selecteur de mode,
+c'est le choix de la destination qui en tient lieu. Chaque destination apparait au panneau
+sous le nom `<HOST_ID>:<suffix>` (le panneau du 3055 n'affiche que 9 caracteres visibles
+apres le HostID, d'ou des suffixes courts).
+
+Profils fournis par defaut (valeurs SNMP calibrees et testees sur un HP LaserJet 3055, voir
+`PROTOCOL.md` pour le detail des essais) :
+
+| Suffixe | Mode | Resolution |
+|---|---|---|
+| `COLOR200` | Couleur | 200 dpi |
+| `GRAY300` | Niveaux de gris | 300 dpi |
+| `BW300` | Noir et blanc (seuillage logiciel) | 300 dpi |
+
+L'imprimante ne distingue que 2 modes materiels (`.3.0` = `8` niveaux de gris / `24`
+couleur) — il n'existe pas de 3e reglage materiel pour le "noir et blanc" : le profil
+`BW300` recoit la meme image en niveaux de gris que `GRAY300`, mais le script la seuille
+lui-meme en 1-bit avant de l'enregistrer (constante `BW_THRESHOLD`, 128 par defaut).
+
+Pour ajouter/modifier un profil, editer la liste `PROFILES` dans le script — ce ne sont pas
+des parametres libres mais des combinaisons calibrees d'apres des captures reseau reelles
+(voir `PROTOCOL.md` pour les valeurs confirmees a d'autres resolutions).
 
 Le script tourne en boucle indefiniment (`Ctrl+C` pour arreter), et journalise chaque etape
 sur stdout. Pour un fonctionnement permanent, en faire un service systemd (`Restart=always`).
 
 ## Limitations connues
 
-- Resolution figee a 150 dpi couleur (valeurs SNMP observees, non parametrees).
+- Seuls 3 profils couleur/resolution sont calibres par defaut (voir ci-dessus) ; en ajouter
+  d'autres necessite d'editer le script, pas seulement une variable d'environnement.
+- Le niveau de compression JPEG (taille de fichier) n'est pas pilotable : confirme pilote par
+  l'imprimante elle-meme mais via un mecanisme encore non identifie (voir `PROTOCOL.md`).
 - Non teste avec le bac d'alimentation automatique (ADF) multi-pages.
 - Testé sur un HP LaserJet 3055 ; les autres modeles de la meme gamme partagent
   vraisemblablement le meme firmware/moteur, mais ce n'est pas confirme.

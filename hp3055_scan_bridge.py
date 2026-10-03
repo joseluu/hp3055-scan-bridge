@@ -4,15 +4,24 @@ Pont "bouton Scan" HP LaserJet 3050/3052/3055/3390/3392 -> n'importe quel outil 
 (ex. scanservjs), sans passer par le logiciel HP d'epoque ni une VM.
 
 Reproduit le protocole reverse-engineere (voir PROTOCOL.md) :
-1. S'enregistre comme destination de scan aupres de l'imprimante (API HTTP/XML proprietaire).
-2. Poll notifications.xml en boucle pour detecter la selection de cette destination au
-   panneau + l'appui sur le bouton "Start".
-3. Declenche le scan physique via une sequence SNMP (le polling HTTP seul ne suffit pas).
+1. S'enregistre comme plusieurs destinations de scan aupres de l'imprimante (une par profil
+   couleur/resolution ci-dessous), via l'API HTTP/XML proprietaire.
+2. Poll notifications.xml en boucle pour detecter la selection de l'une de ces destinations
+   au panneau + l'appui sur le bouton "Start".
+3. Declenche le scan physique via la sequence SNMP du profil correspondant (le polling HTTP
+   seul ne suffit pas).
 4. Recupere l'image (en-tete proprietaire + JPEG brut) sur le port TCP 8290.
-5. Sauvegarde le resultat en PDF dans un dossier de sortie configurable.
+5. Convertit selon le mode du profil (couleur / niveaux de gris / noir-et-blanc par
+   seuillage logiciel — l'imprimante ne distingue pas gris et N&B cote materiel, voir
+   PROTOCOL.md) et sauvegarde en PDF dans un dossier de sortie configurable.
 
 Configuration via variables d'environnement (voir README.md) :
-  PRINTER_IP, HOST_ID, DEST_DISPLAY, OUTPUT_DIR, SNMP_COMMUNITY
+  PRINTER_IP, HOST_ID, OUTPUT_DIR, SNMP_COMMUNITY
+
+Les profils de scan (couleur/resolution/mode) sont definis en dur ci-dessous (PROFILES) :
+ce sont des combinaisons calibrees et testees sur materiel reel, pas des parametres libres
+(voir PROTOCOL.md section 3bis pour l'origine de chaque valeur). Pour ajouter un profil,
+dupliquer une entree et ajuster mode/snmp d'apres les valeurs confirmees dans PROTOCOL.md.
 """
 
 import io
@@ -30,12 +39,13 @@ from PIL import Image
 PRINTER_IP = os.environ.get("PRINTER_IP", "192.168.1.2")
 HOST_ID = os.environ.get("HOST_ID", "MYPC")  # doit correspondre au nom NetBIOS reel de la
 # machine (le firmware semble le resoudre par NBNS avant d'accepter le scan).
-DEST_DISPLAY = os.environ.get("DEST_DISPLAY", "MYPC:AutoScan")
 
 # Un bug (ou un comportement inattendu) a ete observe ou une destination qui obtenait le
 # DestinationID **0** semblait echouer systematiquement ; non confirme avec certitude apres
 # la decouverte du vrai declencheur SNMP (voir PROTOCOL.md). Palliatif conserve par prudence :
-# sacrifier le slot 0 a une destination bidon des le demarrage, avant d'enregistrer la vraie.
+# sacrifier le slot 0 a une destination bidon des le demarrage, avant d'enregistrer les
+# vraies destinations (seulement si la liste est totalement vide, ex. apres un redemarrage
+# de l'imprimante).
 SACRIFICE_DISPLAY = f"{HOST_ID}:_slot0_sacrifice"
 SCAN_PORT = 8290
 POLL_INTERVAL_S = 5
@@ -49,27 +59,62 @@ SNMP_OID_BASE = "1.3.6.1.4.1.11.2.3.9.4.2.1.2.2.1"
 SNMP_OID_STATE = f"{SNMP_OID_BASE}.12.0"  # 1=idle, 2=GO (declenche le scan), passe a 5 une
 # fois l'image prete a etre recuperee sur le port 8290 ; a remettre a 1 apres recuperation.
 
-# ATTENTION : ces deux valeurs par defaut sont celles qui ont ete testees avec succes, mais
-# elles sont INCOHERENTES entre elles (150dpi declare, mais largeur de 2480px qui correspond
-# a du A4 a 300dpi — repere a la relecture, jamais corrige/teste). A essayer : RESOLUTION_DPI=300
-# avec WIDTH_PX=2480 (coherent), ou RESOLUTION_DPI=150 avec WIDTH_PX=1240 (coherent). Voir
-# PROTOCOL.md.
-RESOLUTION_DPI = int(os.environ.get("RESOLUTION_DPI", "150"))
-WIDTH_PX = int(os.environ.get("WIDTH_PX", "2480"))
-_res_hex = f"{RESOLUTION_DPI:04x}"
-SNMP_SCAN_PARAMS = [
-    # (OID relatif a SNMP_OID_BASE, type snmpset, valeur) - valeurs observees pour un scan
-    # couleur ; a affiner si d'autres reglages sont voulus (voir PROTOCOL.md).
-    (".3.0", "i", "8"),
-    (".2.0", "x", f"{_res_hex}0000{_res_hex}0000"),  # XRes/YRes (2x uint32 BE, 16 bits utiles)
-    (".16.0", "i", "0"),
-    (".17.0", "i", str(WIDTH_PX)),  # largeur en pixels
-    (".50.0", "i", "8409"),
-    (".76.0", "i", "0"),
-    (".4.0", "i", "6"),
-    (".53.0", "x", "33330200"),
-    (".54.0", "i", "1"),
+# Chaque profil correspond a une destination separee au panneau (affichee "<HOST_ID>:<suffix>"
+# — le panneau du 3055 n'affiche que 9 caracteres visibles apres le HostID, d'ou des noms
+# courts). `.3.0` est le seul OID qui distingue vraiment le mode cote imprimante : 8 = capteur
+# en niveaux de gris, 24 = capteur couleur. Il n'existe PAS de 3e valeur materielle pour le
+# "noir et blanc" : un rendu N&B 1-bit est obtenu en seuillant nous-memes l'image en niveaux
+# de gris recue (mode "bw" ci-dessous) — voir PROTOCOL.md section "Mode scan confirme par
+# tests croises" pour le detail des essais qui ont etabli ce tableau.
+PROFILES = [
+    {
+        "suffix": "COLOR200",
+        "mode": "color",
+        "snmp": [
+            (".3.0", "i", "24"),
+            (".2.0", "x", "00c8000000c80000"),  # 200 dpi (0x00C8) x/y
+            (".16.0", "i", "0"),
+            (".17.0", "i", "2478"),
+            (".50.0", "i", "8409"),
+            (".76.0", "i", "0"),
+            (".4.0", "i", "6"),
+            (".53.0", "x", "33330200"),
+            (".54.0", "i", "1"),
+        ],
+    },
+    {
+        "suffix": "GRAY300",
+        "mode": "gray",
+        "snmp": [
+            (".3.0", "i", "8"),
+            (".2.0", "x", "012c0000012c0000"),  # 300 dpi (0x012C) x/y
+            (".16.0", "i", "0"),
+            (".17.0", "i", "2480"),
+            (".50.0", "i", "8409"),
+            (".76.0", "i", "0"),
+            (".4.0", "i", "6"),
+            (".53.0", "x", "33330200"),
+            (".54.0", "i", "1"),
+        ],
+    },
+    {
+        "suffix": "BW300",
+        "mode": "bw",
+        "snmp": [
+            (".3.0", "i", "8"),
+            (".2.0", "x", "012c0000012c0000"),  # 300 dpi (0x012C) x/y
+            (".16.0", "i", "0"),
+            (".17.0", "i", "2480"),
+            (".50.0", "i", "8409"),
+            (".76.0", "i", "0"),
+            (".4.0", "i", "6"),
+            (".53.0", "x", "33330200"),
+            (".54.0", "i", "1"),
+        ],
+    },
 ]
+BW_THRESHOLD = 128  # seuil de binarisation pour le mode "bw" (0-255), ajustable
+
 OUTPUT_DIR = Path(os.environ.get("OUTPUT_DIR", "./output"))
 
 NS = {"pls": "http://www.hp.com/schemas/imaging/pls/dev/1.0"}
@@ -77,6 +122,10 @@ NS = {"pls": "http://www.hp.com/schemas/imaging/pls/dev/1.0"}
 
 def log(msg):
     print(f"{datetime.now().isoformat(timespec='seconds')} {msg}", flush=True)
+
+
+def profile_display(profile: dict) -> str:
+    return f"{HOST_ID}:{profile['suffix']}"
 
 
 def http_get(path):
@@ -154,17 +203,18 @@ def add_destination(display_name: str):
     log(f"Destination enregistree : {HOST_ID}^{display_name}")
 
 
-def ensure_destination_registered():
+def ensure_destinations_registered():
     existing = list_destinations()
     if not existing:
         # L'imprimante vient probablement de redemarrer (destinations effacees) : le
         # premier DestinationID attribue sera 0 (voir note SACRIFICE_DISPLAY plus haut).
         add_destination(SACRIFICE_DISPLAY)
         existing = list_destinations()
-    if (HOST_ID, DEST_DISPLAY) in existing:
-        log(f"Destination deja enregistree : {HOST_ID}^{DEST_DISPLAY}")
-        return
-    add_destination(DEST_DISPLAY)
+    for profile in PROFILES:
+        disp = profile_display(profile)
+        if (HOST_ID, disp) in existing:
+            continue
+        add_destination(disp)
 
 
 def poll_notifications():
@@ -180,6 +230,15 @@ def poll_notifications():
         "ScanToHostID": scan_to.findtext("pls:ScanToHostID", "", NS),
         "ScanToDeviceDisplay": scan_to.findtext("pls:ScanToDeviceDisplay", "", NS),
     }
+
+
+def match_profile(notification: dict):
+    if not notification or notification["ScanToHostID"] != HOST_ID:
+        return None
+    for profile in PROFILES:
+        if notification["ScanToDeviceDisplay"] == profile_display(profile):
+            return profile
+    return None
 
 
 def discover():
@@ -209,11 +268,11 @@ def snmp_set(oid_suffix: str, type_char: str, value: str):
     )
 
 
-def trigger_scan_via_snmp():
+def trigger_scan_via_snmp(snmp_params):
     """Reproduit la sequence SNMP capturee depuis un vrai client HP : configure les
-    parametres du scan puis positionne l'OID d'etat a 2 pour demarrer physiquement le
-    scan (voir PROTOCOL.md section 3bis)."""
-    for suffix, type_char, value in SNMP_SCAN_PARAMS:
+    parametres du scan (specifiques au profil choisi) puis positionne l'OID d'etat a 2 pour
+    demarrer physiquement le scan (voir PROTOCOL.md section 3bis)."""
+    for suffix, type_char, value in snmp_params:
         snmp_set(suffix, type_char, value)
     snmp_set(".12.0", "i", "2")
     log("commande SNMP GO envoyee")
@@ -251,40 +310,51 @@ def fetch_scan_jpeg():
     return data[idx:]
 
 
-def save_as_pdf(jpeg_bytes: bytes):
+def save_as_pdf(jpeg_bytes: bytes, mode: str):
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     name = datetime.now().strftime("scan_%Y-%m-%d %H.%M.%S.pdf")
     dest = OUTPUT_DIR / name
-    img = Image.open(io.BytesIO(jpeg_bytes)).convert("RGB")
+    img = Image.open(io.BytesIO(jpeg_bytes))
+    if mode == "color":
+        img = img.convert("RGB")
+    elif mode == "gray":
+        img = img.convert("L")
+    elif mode == "bw":
+        # L'imprimante ne distingue pas "niveaux de gris" et "noir et blanc" cote materiel
+        # (voir PROTOCOL.md) : on recoit toujours une image en niveaux de gris, et c'est a
+        # nous de la seuiller en 1-bit pour obtenir un vrai rendu N&B.
+        img = img.convert("L").point(lambda p: 255 if p > BW_THRESHOLD else 0, mode="1")
+    else:
+        raise ValueError(f"mode de scan inconnu : {mode!r}")
     img.save(dest, "PDF")
-    log(f"scan sauvegarde : {dest} ({len(jpeg_bytes)} octets JPEG)")
+    log(f"scan sauvegarde : {dest} ({len(jpeg_bytes)} octets JPEG, mode={mode})")
 
 
 def main():
-    log(f"demarrage, cible {PRINTER_IP}, destination {HOST_ID}^{DEST_DISPLAY}")
-    ensure_destination_registered()
+    profiles_desc = ", ".join(f"{HOST_ID}:{p['suffix']} ({p['mode']})" for p in PROFILES)
+    log(f"demarrage, cible {PRINTER_IP}, destinations : {profiles_desc}")
+    ensure_destinations_registered()
     discover()
     log("sequence de decouverte effectuee")
     cycle = 0
-    was_triggered = False  # front montant seulement : eviter de re-traiter le meme job
+    last_matched_suffix = None  # front montant seulement : eviter de re-traiter le meme job
     while True:
         try:
             if cycle % 12 == 0:  # ~ toutes les 60s avec POLL_INTERVAL_S=5
                 discover()
-                ensure_destination_registered()  # au cas ou l'imprimante aurait redemarre
+                ensure_destinations_registered()  # au cas ou l'imprimante aurait redemarre
                 # (efface ses destinations) pendant que ce pont continue de tourner
             n = poll_notifications()
-            triggered = bool(
-                n and n["ScanToHostID"] == HOST_ID and n["ScanToDeviceDisplay"] == DEST_DISPLAY
-            )
-            is_new_trigger = triggered and not was_triggered
-            was_triggered = triggered
+            matched = match_profile(n)
+            matched_suffix = matched["suffix"] if matched else None
+            is_new_trigger = matched_suffix is not None and matched_suffix != last_matched_suffix
+            last_matched_suffix = matched_suffix
             if is_new_trigger:
-                log(f"scan detecte pour {DEST_DISPLAY!r}, declenchement SNMP...")
-                trigger_scan_via_snmp()
+                log(f"scan detecte pour {profile_display(matched)!r} (mode={matched['mode']}), declenchement SNMP...")
+                trigger_scan_via_snmp(matched["snmp"])
                 try:
                     jpeg_bytes = fetch_scan_jpeg()
-                    save_as_pdf(jpeg_bytes)
+                    save_as_pdf(jpeg_bytes, matched["mode"])
                 finally:
                     reset_snmp_state()
         except Exception as e:
