@@ -48,13 +48,22 @@ SNMP_COMMUNITY = os.environ.get("SNMP_COMMUNITY", "internal")
 SNMP_OID_BASE = "1.3.6.1.4.1.11.2.3.9.4.2.1.2.2.1"
 SNMP_OID_STATE = f"{SNMP_OID_BASE}.12.0"  # 1=idle, 2=GO (declenche le scan), passe a 5 une
 # fois l'image prete a etre recuperee sur le port 8290 ; a remettre a 1 apres recuperation.
+
+# ATTENTION : ces deux valeurs par defaut sont celles qui ont ete testees avec succes, mais
+# elles sont INCOHERENTES entre elles (150dpi declare, mais largeur de 2480px qui correspond
+# a du A4 a 300dpi — repere a la relecture, jamais corrige/teste). A essayer : RESOLUTION_DPI=300
+# avec WIDTH_PX=2480 (coherent), ou RESOLUTION_DPI=150 avec WIDTH_PX=1240 (coherent). Voir
+# PROTOCOL.md.
+RESOLUTION_DPI = int(os.environ.get("RESOLUTION_DPI", "150"))
+WIDTH_PX = int(os.environ.get("WIDTH_PX", "2480"))
+_res_hex = f"{RESOLUTION_DPI:04x}"
 SNMP_SCAN_PARAMS = [
     # (OID relatif a SNMP_OID_BASE, type snmpset, valeur) - valeurs observees pour un scan
-    # couleur a 150dpi ; a affiner si d'autres reglages sont voulus (voir PROTOCOL.md).
+    # couleur ; a affiner si d'autres reglages sont voulus (voir PROTOCOL.md).
     (".3.0", "i", "8"),
-    (".2.0", "x", "0096000000960000"),  # XRes=150, YRes=150 (2x uint32 BE, 16 bits utiles)
+    (".2.0", "x", f"{_res_hex}0000{_res_hex}0000"),  # XRes/YRes (2x uint32 BE, 16 bits utiles)
     (".16.0", "i", "0"),
-    (".17.0", "i", "2480"),  # largeur en pixels
+    (".17.0", "i", str(WIDTH_PX)),  # largeur en pixels
     (".50.0", "i", "8409"),
     (".76.0", "i", "0"),
     (".4.0", "i", "6"),

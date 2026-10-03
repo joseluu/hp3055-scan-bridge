@@ -40,6 +40,14 @@ Tout se regle via variables d'environnement :
 | `DEST_DISPLAY` | `MYPC:AutoScan` | Nom affiche au panneau de l'imprimante dans la liste des destinations |
 | `OUTPUT_DIR` | `./output` | Dossier ou sont deposes les PDF generes |
 | `SNMP_COMMUNITY` | `internal` | Communaute SNMP (valeur observee sur le modele teste) |
+| `RESOLUTION_DPI` | `150` | Resolution X/Y envoyee au scanner. **Attention**, voir note ci-dessous. |
+| `WIDTH_PX` | `2480` | Largeur en pixels envoyee au scanner, doit correspondre a `RESOLUTION_DPI` |
+
+> Les valeurs par defaut de `RESOLUTION_DPI`/`WIDTH_PX` ci-dessus sont celles qui ont servi
+> aux tout premiers tests reussis, mais elles sont **incoherentes entre elles** (150dpi
+> declare avec une largeur qui correspond a du A4 a 300dpi) — repere apres coup, jamais
+> recorrige/teste. Essayer `RESOLUTION_DPI=300` (coherent avec `WIDTH_PX=2480`, du A4 a
+> 300dpi) ou `RESOLUTION_DPI=150` avec `WIDTH_PX=1240` (A4 a 150dpi). Voir `PROTOCOL.md`.
 
 ```bash
 export PRINTER_IP=192.168.1.50
