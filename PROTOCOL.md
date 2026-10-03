@@ -106,16 +106,17 @@ Sequence observee (`SetRequest`, OID sous prefixe `.1.3.6.1.4.1.11.2.3.9.4.2.1.2
 
 | OID (suffixe) | Type       | Valeur observee           | Role probable |
 |---|---|---|---|
-| `.3.0`  | INTEGER    | **8 = niveaux de gris, 24 = couleur** (confirme sur 6 essais croises, voir tableau ci-dessous) | **mode du capteur (le seul vrai selecteur)** |
-| `.2.0`  | Hex-STRING | `XX XX 00 00` repete 2x (XRes puis YRes, little-endian 16 bits utiles) | **resolution en DPI** : `C8 00...`x2 = 200dpi, `2C 01...`x2 = 300dpi, `96 00...`x2 = 150dpi |
-| `.16.0` | INTEGER    | 0                         | ? |
-| `.17.0` | INTEGER    | largeur en pixels, varie avec `.2.0` (2478-2480 a 200/300dpi pour du A4) | largeur en pixels, deduite de la resolution (~ DPI x 8.27") |
-| `.50.0` | INTEGER    | 8409 (gris) / 8448 (couleur 300dpi) / 8409 (couleur 200dpi) | taille/buffer attendu, varie avec mode+resolution |
-| `.76.0` | INTEGER    | 0                         | ? |
-| `.4.0`  | INTEGER    | **toujours 6** dans tous nos essais (gris, couleur, 150/200/300dpi) | **PAS le selecteur de mode malgre l'hypothese initiale** — role encore inconnu |
-| `.53.0` | Hex-STRING | `33 33 02 00`             | ? |
-| `.54.0` | INTEGER    | 1                         | ? (flag start-related) |
-| `.12.0` | INTEGER    | **1→2 = GO**, passe a 5 une fois l'image prete, a remettre a 1 par le client apres recuperation | **etat de la machine a etats du scan** |
+| `.3.0`  | INTEGER    | **8 = niveaux de gris, 24 = couleur** (confirme sur 6 essais croises, voir tableau ci-dessous) | `objPixelDataType` (nom officiel HPLIP, voir section 3ter) |
+| `.2.0`  | Hex-STRING | `XX XX 00 00` repete 2x (XRes puis YRes, little-endian 16 bits utiles) | `objResolution` : `C8 00...`x2 = 200dpi, `2C 01...`x2 = 300dpi, `96 00...`x2 = 150dpi |
+| `.16.0` | INTEGER    | 0                         | ? (absent du code HPLIP — specifique au mecanisme "push" panneau, voir 3ter) |
+| `.17.0` | INTEGER    | largeur en pixels, varie avec `.2.0` (2478-2480 a 200/300dpi pour du A4) | largeur en pixels, deduite de la resolution (~ DPI x 8.27") — absent du code HPLIP |
+| `.50.0` | INTEGER    | 8409 (gris) / 8448 (couleur 300dpi) / 8409 (couleur 200dpi) | taille/buffer attendu, varie avec mode+resolution — absent du code HPLIP |
+| `.76.0` | INTEGER    | 0                         | ? (absent du code HPLIP) |
+| `.4.0`  | INTEGER    | **toujours 6** dans tous nos essais (gris, couleur, 150/200/300dpi) | `objCompression` (nom officiel HPLIP) — **6 = JPEG**, confirme par source (voir 3ter) |
+| `.5.0`  | INTEGER    | **jamais regle par notre bridge avant le 2026-10-04** | `objCompressionFactor` (0-100) — **champ manquant identifie comme cause probable de corruption**, voir section 3ter |
+| `.53.0` | Hex-STRING | `33 33 02 00`             | ? (absent du code HPLIP) |
+| `.54.0` | INTEGER    | 1                         | ? (absent du code HPLIP) |
+| `.12.0` | INTEGER    | **1→2 = GO**, passe a 5 une fois l'image prete, a remettre a 1 par le client apres recuperation | `objUploadState` (nom officiel HPLIP) |
 
 ### Mode scan (.3.0) et resolution (.2.0/.17.0) — confirme par tests croises (2026-10-03)
 
@@ -183,11 +184,93 @@ Point important : cette sequence SNMP ne semble **pas liee a une destination par
 scan lui-meme. Le routage vers la bonne destination HTTP (`notifications.xml`) et le port 8290
 comme canal de recuperation restent lies au mecanisme de destination des sections 1-2.
 
+## 3ter. Corruption JPEG sur documents denses a 300dpi — diagnostic via source HPLIP (2026-10-04)
+
+**Symptome observe** (2026-10-03 soir) : un scan bouton d'une facture texte dense (BW300 ou
+GRAY300, ~1.9-2 Mo de JPEG brut, contre 80-180 Ko pour nos tests precedents avec des pages
+quasi vides) produit une image correcte sur le haut de la page puis degenere en bruit/
+corruption puis en noir pour le reste. **Reproduit a l'identique avec le vrai logiciel HP sur
+la VM** (meme destination/sequence SNMP de base), ce qui ecarte un bug du bridge lui-meme —
+mais **scanservjs (HPLIP/SANE) scanne le meme document sans aucun probleme**, ce qui ecarte
+aussi une limitation materielle generale du scanner.
+
+**Methode de diagnostic** : capture reseau d'un scan scanservjs du meme document (meme reseau,
+meme OID SNMP de base `.1.3.6.1.4.1.11.2.3.9.4.2.1.*` — confirmant que SANE/HPLIP utilise EXACTEMENT
+le meme mecanisme SNMP+port 8290 que le "ScanToPC" du panneau, pas un protocole different comme
+suppose initialement), puis lecture du code source HPLIP (`libsane-hpaio`, paquet
+`libsane-hpaio 3.22.10+dfsg0-8.1` installe dans le conteneur `scanservjs-hplip`) pour avoir
+la signification **officielle** des OID plutot que de deviner par essais-erreurs. Fichier cle :
+[`scan/sane/sclpml.c`](https://github.com/rfabbri/hplip/blob/master/scan/sane/sclpml.c)
+(fonction `hpaioPmlAllocateObjects`, ~ligne 336) et
+[`scan/sane/common.h`](https://github.com/rfabbri/hplip/blob/master/scan/sane/common.h).
+
+**Table officielle des OID** (extraite du source, prefixe `1.3.6.1.4.1.11.2.3.9.4.2.1` sauf
+mention contraire) :
+
+| OID complet | Nom HPLIP | Role |
+|---|---|---|
+| `.2.2.2.1.0` | `objScannerStatus` | etat general du scanner |
+| `.2.2.2.3.0` | `objResolutionRange` | liste des resolutions supportees (chaine ASCII, ex. `(75)x(75),(100)x(100),...,(1200x1200)`) |
+| `.1.1.18.0` | `objUploadTimeout` | timeout d'upload (HPLIP envoie `45`, probablement en secondes) |
+| `.2.2.1.1.0` | `objContrast` | contraste |
+| `.2.2.1.2.0` | `objResolution` | **resolution** (confirme) |
+| `.2.2.1.3.0` | `objPixelDataType` | **mode** (confirme : 8=gris, 24=couleur ; HPLIP utilise aussi `1`=lineart) |
+| `.2.2.1.4.0` | `objCompression` | **algorithme de compression** : `1`=None, `2`=Default, `3`=MH, `4`=MR, `5`=**MMR (= CCITT G4)**, `6`=**JPEG** |
+| `.2.2.1.5.0` | **`objCompressionFactor`** | **facteur de compression JPEG, 0-100** (`MIN_JPEG_COMPRESSION_FACTOR=0`, `MAX=100`) — **jamais regle par notre bridge avant ce correctif** |
+| `.2.2.1.6.0` | `objUploadError` | code d'erreur upload |
+| `.2.2.1.12.0` | `objUploadState` | **etat machine a etats** (confirme : 1=idle, 2=GO, 5=pret) |
+| `.2.2.1.14.0` | `objAbcThresholds` | seuils ABC (auto background control) |
+| `.2.2.1.15.0` | `objSharpeningCoefficient` | nettete |
+| `.2.2.1.31.0` | `objNeutralClipThresholds` | seuils d'ecretage neutre |
+| `.2.2.1.32.0` | `objToneMap` | courbe de tons |
+| `.5.1.4.0` | `objCopierReduction` | taux de reduction/agrandissement copieur (100 = 100%, PAS lie a un buffer malgre l'hypothese initiale) |
+| `.1.1.1.25.0` | `objScanToken` | jeton de session (d'ou les valeurs pseudo-aleatoires observees) |
+| `.2.2.1.75.0` | `objModularHardware` | — |
+
+**Point cle** : `.16.0`, `.17.0`, `.50.0`, `.53.0`, `.54.0` et `.76.0` (que notre bridge regle
+depuis le debut, captures sur le tout premier essai reussi via la VM) **n'apparaissent dans
+aucun objet PML alloue par HPLIP**. Ce ne sont donc probablement PAS des champs generiques
+HP, mais des champs specifiques au mecanisme "push" du bouton panneau (que HPLIP n'utilise
+jamais, puisque SANE fonctionne en pull) — PAS une raison de les retirer de notre sequence,
+qui reste necessaire pour ce mecanisme-la. Le code HPLIP montre en revanche clairement que
+**`.5.0` (CompressionFactor) est un parametre generique**, regle systematiquement par HPLIP
+quel que soit le mecanisme de declenchement, et donc manquant chez nous a tort.
+
+**Hypothese de cause racine** : `SAFER_JPEG_COMPRESSION_FACTOR = 10` est un nom tres
+explicite dans le source HPLIP (`common.h` ligne 110) — implique qu'un facteur plus eleve
+(valeur par defaut/residuelle du firmware si le champ n'est jamais explicitement regle) est
+**connu pour etre a risque**. Sans jamais regler `.5.0`, notre bridge (et l'ancien logiciel HP
+sur la VM, qui montre la meme corruption) laisse ce facteur a une valeur potentiellement
+agressive, qui pourrait faire deborder un buffer interne de l'encodeur JPEG du firmware
+(~2005) lorsque le volume de donnees a encoder est important (document dense), alors que les
+petites images de nos tests precedents ne declenchaient jamais ce depassement.
+
+**Correctif applique (2026-10-04, NON ENCORE VALIDE PAR UN VRAI SCAN)** : ajout de
+`.5.0 = 10 (INTEGER)` a la sequence SNMP des 3 profils JPEG (`COLOR200`, `GRAY300`, `BW300`)
+dans `hp3055_scan_bridge.py`, en reprenant la valeur `SAFER_JPEG_COMPRESSION_FACTOR` choisie
+par les auteurs de HPLIP. C'est un ajout minimal et conservateur (rien retire de la sequence
+existante, qui fonctionne par ailleurs). **A tester explicitement avec un scan dense (facture,
+photo detaillee) en BW300 ou GRAY300 une fois ce correctif deploye** — si la corruption
+disparait, cause racine confirmee ; sinon, explorer d'autres OID (`.14.0`/`.15.0`/`.31.0`/
+`.32.0` : contraste/nettete/seuils, moins probables mais pas testes).
+
+**Piste alternative non retenue pour l'instant** : utiliser directement le mode "vrai N&B"
+de HPLIP (`.3.0=1` + `.4.0=5` MMR/G4 au lieu de JPEG) pour le profil BW300, qui eviterait
+structurellement le probleme (G4 est un codec different, sans doute plus robuste sur ce
+firmware, et plus adapte au texte). Tente une fois manuellement (OID minimales seulement,
+sans `.1.1.1.25.0`/`.1.1.18.0`/les lectures prealables que fait HPLIP) : resultat incomplet
+(quelques lignes du haut de la page seulement, puis blanc) — la sequence HPLIP complete pour
+ce mode n'a pas ete reproduite fidelement. A refaire plus tard en suivant exactement l'ordre
+du vrai code HPLIP (y compris les lectures GetRequest et `.1.1.1.25.0`/`.1.1.18.0`) si le
+correctif JPEG ci-dessus ne suffit pas pour BW300.
+
 ## Ce qu'il reste a clarifier
 
 - Decodage exact de l'en-tete binaire avant le JPEG (offsets precis de largeur/hauteur/dpi/
   autres flags).
-- Role exact de chaque OID SNMP encore marque "?" ci-dessus, et du champ `.25.0` a 16 octets.
+- Role exact des OID encore marques "?" (`.16.0`, `.53.0`, `.54.0`, `.76.0`) — absents du
+  code HPLIP, donc specifiques au mecanisme "push" du bouton panneau, voir section 3ter.
+- **Valider le correctif `.5.0=10` par un vrai scan dense** (voir section 3ter).
 - Comportement si plusieurs pages (bac ADF) : une connexion par page ? meme connexion pour
   plusieurs images concatenees ? Non teste.
 - Role exact du champ `<StartScan>` (bloc `<StartScanNotifications>` de `notifications.xml`,

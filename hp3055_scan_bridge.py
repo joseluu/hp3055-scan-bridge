@@ -77,7 +77,10 @@ PROFILES = [
             (".17.0", "i", "2478"),
             (".50.0", "i", "8409"),
             (".76.0", "i", "0"),
-            (".4.0", "i", "6"),
+            (".4.0", "i", "6"),       # PML_COMPRESSION_JPEG (voir PROTOCOL.md)
+            (".5.0", "i", "10"),      # CompressionFactor (0-100) ; 10 = valeur HPLIP
+            # "SAFER_JPEG_COMPRESSION_FACTOR", jamais reglee avant cette correction - voir
+            # PROTOCOL.md pour l'hypothese de bug firmware que ce champ manquant expliquerait.
             (".53.0", "x", "33330200"),
             (".54.0", "i", "1"),
         ],
@@ -92,7 +95,8 @@ PROFILES = [
             (".17.0", "i", "2480"),
             (".50.0", "i", "8409"),
             (".76.0", "i", "0"),
-            (".4.0", "i", "6"),
+            (".4.0", "i", "6"),       # PML_COMPRESSION_JPEG
+            (".5.0", "i", "10"),      # CompressionFactor - voir note COLOR200 ci-dessus
             (".53.0", "x", "33330200"),
             (".54.0", "i", "1"),
         ],
@@ -107,7 +111,8 @@ PROFILES = [
             (".17.0", "i", "2480"),
             (".50.0", "i", "8409"),
             (".76.0", "i", "0"),
-            (".4.0", "i", "6"),
+            (".4.0", "i", "6"),       # PML_COMPRESSION_JPEG
+            (".5.0", "i", "10"),      # CompressionFactor - voir note COLOR200 ci-dessus
             (".53.0", "x", "33330200"),
             (".54.0", "i", "1"),
         ],
