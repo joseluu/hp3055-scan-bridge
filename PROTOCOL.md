@@ -1,5 +1,14 @@
 # Protocole "Scan to PC" du HP LaserJet 3050/3052/3055/3390/3392 — reverse engineering
 
+> **Note (2026-10-04)** : depuis cette date, `hp3055_scan_bridge.py` n'utilise plus les
+> sections 3/3bis/3ter de ce document pour l'acquisition du scan — il delegue cette partie a
+> scanservjs via son API HTTP (voir README.md, section "Pourquoi deleguer a scanservjs ?").
+> Seules les sections 1 et 2 (enregistrement de destination, detection de l'appui bouton via
+> `notifications.xml`) restent utilisees en pratique. Le reste de ce document est conserve tel
+> quel : la sequence SNMP de declenchement direct fonctionne et reste documentee ici pour
+> quiconque voudrait l'utiliser sans dependre de scanservjs, ou pour comprendre l'historique
+> du diagnostic (section 3ter en particulier).
+
 Capture de reference obtenue en enregistrant une destination de scan depuis le logiciel HP
 "Full Solution" (tournant dans une VM Windows 2000, l'installeur d'epoque ne s'installant
 pas proprement sur un OS moderne), puis en selectionnant cette destination au panneau du

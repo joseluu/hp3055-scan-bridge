@@ -1,44 +1,45 @@
 #!/usr/bin/env python3
 """
-Pont "bouton Scan" HP LaserJet 3050/3052/3055/3390/3392 -> n'importe quel outil de scan
-(ex. scanservjs), sans passer par le logiciel HP d'epoque ni une VM.
+Pont "bouton Scan" HP LaserJet 3050/3052/3055/3390/3392 -> scanservjs, sans passer par le
+logiciel HP d'epoque ni une VM.
 
-Reproduit le protocole reverse-engineere (voir PROTOCOL.md) :
+Architecture (voir PROTOCOL.md pour le detail du protocole propriétaire et son historique) :
 1. S'enregistre comme plusieurs destinations de scan aupres de l'imprimante (une par profil
-   couleur/resolution ci-dessous), via l'API HTTP/XML proprietaire.
+   couleur/resolution ci-dessous), via l'API HTTP/XML proprietaire du panneau.
 2. Poll notifications.xml en boucle pour detecter la selection de l'une de ces destinations
    au panneau + l'appui sur le bouton "Start".
-3. Declenche le scan physique via la sequence SNMP du profil correspondant (le polling HTTP
-   seul ne suffit pas).
-4. Recupere l'image (en-tete proprietaire + JPEG brut) sur le port TCP 8290.
-5. Convertit selon le mode du profil (couleur / niveaux de gris / noir-et-blanc par
-   seuillage logiciel — l'imprimante ne distingue pas gris et N&B cote materiel, voir
-   PROTOCOL.md) et sauvegarde en PDF dans un dossier de sortie configurable.
+3. Des detection, delegue l'acquisition reelle du scan a scanservjs via son API HTTP locale
+   (POST /api/v1/scan) plutot que de reproduire nous-memes la sequence SNMP de declenchement
+   et de recuperation du JPEG brut.
+
+Ce choix d'architecture n'est pas arbitraire : une premiere version de ce pont reproduisait
+elle-meme tout le protocole SNMP de bout en bout (voir l'historique git), mais produisait des
+scans corrompus sur des documents denses (texte serre, photos detaillees) — tres probablement
+un defaut du firmware de l'imprimante dans ce chemin "push" specifique, puisque scanservjs
+(qui utilise HPLIP/SANE, un chemin "pull" completement distinct pour le meme materiel) ne
+montre jamais ce probleme. Ce pont se contente donc de detecter l'evenement bouton (ce que ni
+SANE ni scanservjs ne savent faire pour ce protocole proprietaire) et laisse scanservjs faire
+le travail d'acquisition, dont la fiabilite est deja eprouvee.
 
 Configuration via variables d'environnement (voir README.md) :
-  PRINTER_IP, HOST_ID, OUTPUT_DIR, SNMP_COMMUNITY
-
-Les profils de scan (couleur/resolution/mode) sont definis en dur ci-dessous (PROFILES) :
-ce sont des combinaisons calibrees et testees sur materiel reel, pas des parametres libres
-(voir PROTOCOL.md section 3bis pour l'origine de chaque valeur). Pour ajouter un profil,
-dupliquer une entree et ajuster mode/snmp d'apres les valeurs confirmees dans PROTOCOL.md.
+  PRINTER_IP, HOST_ID, SCANSERVJS_URL, SCANSERVJS_DEVICE_ID
 """
 
-import io
+import json
 import os
 import socket
-import subprocess
 import time
 import urllib.request
 import xml.etree.ElementTree as ET
 from datetime import datetime
-from pathlib import Path
-
-from PIL import Image
 
 PRINTER_IP = os.environ.get("PRINTER_IP", "192.168.1.2")
 HOST_ID = os.environ.get("HOST_ID", "MYPC")  # doit correspondre au nom NetBIOS reel de la
 # machine (le firmware semble le resoudre par NBNS avant d'accepter le scan).
+
+SCANSERVJS_URL = os.environ.get("SCANSERVJS_URL", "http://127.0.0.1:8080")
+SCANSERVJS_DEVICE_ID = os.environ.get("SCANSERVJS_DEVICE_ID", "")  # requis, voir README.md
+# (visible via `curl $SCANSERVJS_URL/api/v1/context`, champ devices[].id)
 
 # Un bug (ou un comportement inattendu) a ete observe ou une destination qui obtenait le
 # DestinationID **0** semblait echouer systematiquement ; non confirme avec certitude apres
@@ -47,80 +48,33 @@ HOST_ID = os.environ.get("HOST_ID", "MYPC")  # doit correspondre au nom NetBIOS 
 # vraies destinations (seulement si la liste est totalement vide, ex. apres un redemarrage
 # de l'imprimante).
 SACRIFICE_DISPLAY = f"{HOST_ID}:_slot0_sacrifice"
-SCAN_PORT = 8290
 POLL_INTERVAL_S = 5
-
-# Le vrai declencheur du scan physique n'est PAS le HTTP notifications.xml (qui ne fait que
-# refleter l'etat pour l'affichage panneau) mais une sequence SNMP v1 (communaute "internal"
-# par defaut) vers des OID HP privees, capturee depuis un vrai client HP. Sans cette sequence,
-# le moteur de scan ne bouge jamais, meme si le panneau affiche "en attente du PC".
-SNMP_COMMUNITY = os.environ.get("SNMP_COMMUNITY", "internal")
-SNMP_OID_BASE = "1.3.6.1.4.1.11.2.3.9.4.2.1.2.2.1"
-SNMP_OID_STATE = f"{SNMP_OID_BASE}.12.0"  # 1=idle, 2=GO (declenche le scan), passe a 5 une
-# fois l'image prete a etre recuperee sur le port 8290 ; a remettre a 1 apres recuperation.
 
 # Chaque profil correspond a une destination separee au panneau (affichee "<HOST_ID>:<suffix>"
 # — le panneau du 3055 n'affiche que 9 caracteres visibles apres le HostID, d'ou des noms
-# courts). `.3.0` est le seul OID qui distingue vraiment le mode cote imprimante : 8 = capteur
-# en niveaux de gris, 24 = capteur couleur. Il n'existe PAS de 3e valeur materielle pour le
-# "noir et blanc" : un rendu N&B 1-bit est obtenu en seuillant nous-memes l'image en niveaux
-# de gris recue (mode "bw" ci-dessous) — voir PROTOCOL.md section "Mode scan confirme par
-# tests croises" pour le detail des essais qui ont etabli ce tableau.
+# courts), et a un jeu de parametres passes tel quel a l'API scanservjs (voir
+# https://github.com/sbs20/scanservjs, endpoint POST /api/v1/scan). "mode" doit etre une des
+# options exposees par le backend SANE du device (verifier avec `--mode` dans la reponse de
+# /api/v1/context) : pour HPLIP/hpaio, "Lineart"|"Gray"|"Color". Le pipeline choisit le format
+# de sortie ; voir la liste complete des pipelines dans /api/v1/context, champ
+# devices[].settings.pipeline.options.
 PROFILES = [
     {
         "suffix": "COLOR200",
-        "mode": "color",
-        "snmp": [
-            (".3.0", "i", "24"),
-            (".2.0", "x", "00c8000000c80000"),  # 200 dpi (0x00C8) x/y
-            (".16.0", "i", "0"),
-            (".17.0", "i", "2478"),
-            (".50.0", "i", "8409"),
-            (".76.0", "i", "0"),
-            (".4.0", "i", "6"),       # PML_COMPRESSION_JPEG (voir PROTOCOL.md)
-            (".5.0", "i", "10"),      # CompressionFactor (0-100) ; 10 = valeur HPLIP
-            # "SAFER_JPEG_COMPRESSION_FACTOR", jamais reglee avant cette correction - voir
-            # PROTOCOL.md pour l'hypothese de bug firmware que ce champ manquant expliquerait.
-            (".53.0", "x", "33330200"),
-            (".54.0", "i", "1"),
-        ],
+        "params": {"mode": "Color", "resolution": 200},
+        "pipeline": "PDF (JPG | @:pipeline.medium-quality)",
     },
     {
         "suffix": "GRAY300",
-        "mode": "gray",
-        "snmp": [
-            (".3.0", "i", "8"),
-            (".2.0", "x", "012c0000012c0000"),  # 300 dpi (0x012C) x/y
-            (".16.0", "i", "0"),
-            (".17.0", "i", "2480"),
-            (".50.0", "i", "8409"),
-            (".76.0", "i", "0"),
-            (".4.0", "i", "6"),       # PML_COMPRESSION_JPEG
-            (".5.0", "i", "10"),      # CompressionFactor - voir note COLOR200 ci-dessus
-            (".53.0", "x", "33330200"),
-            (".54.0", "i", "1"),
-        ],
+        "params": {"mode": "Gray", "resolution": 300},
+        "pipeline": "PDF (JPG | @:pipeline.medium-quality)",
     },
     {
         "suffix": "BW300",
-        "mode": "bw",
-        "snmp": [
-            (".3.0", "i", "8"),
-            (".2.0", "x", "012c0000012c0000"),  # 300 dpi (0x012C) x/y
-            (".16.0", "i", "0"),
-            (".17.0", "i", "2480"),
-            (".50.0", "i", "8409"),
-            (".76.0", "i", "0"),
-            (".4.0", "i", "6"),       # PML_COMPRESSION_JPEG
-            (".5.0", "i", "10"),      # CompressionFactor - voir note COLOR200 ci-dessus
-            (".53.0", "x", "33330200"),
-            (".54.0", "i", "1"),
-        ],
+        "params": {"mode": "Lineart", "resolution": 300},
+        "pipeline": "PDF (JPG | @:pipeline.medium-quality)",
     },
 ]
-BW_THRESHOLD = 128  # seuil de binarisation pour le mode "bw" (0-255), ajustable
-
-OUTPUT_DIR = Path(os.environ.get("OUTPUT_DIR", "./output"))
 
 NS = {"pls": "http://www.hp.com/schemas/imaging/pls/dev/1.0"}
 
@@ -263,81 +217,35 @@ def discover():
             log(f"discover() erreur sur {path} (ignoree) : {e!r}")
 
 
-def snmp_set(oid_suffix: str, type_char: str, value: str):
-    oid = f"{SNMP_OID_BASE}{oid_suffix}"
-    subprocess.run(
-        ["snmpset", "-v1", "-c", SNMP_COMMUNITY, PRINTER_IP, oid, type_char, value],
-        check=True,
-        capture_output=True,
-        timeout=10,
+def trigger_scanservjs_scan(profile: dict):
+    """Demande a scanservjs d'effectuer l'acquisition reelle, via son API HTTP locale (la
+    meme que son interface web utilise). Voir docstring du module pour le choix de deleguer
+    ici plutot que de reproduire la sequence SNMP nous-memes."""
+    if not SCANSERVJS_DEVICE_ID:
+        raise RuntimeError("SCANSERVJS_DEVICE_ID non configure (voir README.md)")
+    body = {
+        "params": {"deviceId": SCANSERVJS_DEVICE_ID, **profile["params"]},
+        "pipeline": profile["pipeline"],
+    }
+    data = json.dumps(body).encode("utf-8")
+    req = urllib.request.Request(
+        f"{SCANSERVJS_URL}/api/v1/scan",
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
     )
-
-
-def trigger_scan_via_snmp(snmp_params):
-    """Reproduit la sequence SNMP capturee depuis un vrai client HP : configure les
-    parametres du scan (specifiques au profil choisi) puis positionne l'OID d'etat a 2 pour
-    demarrer physiquement le scan (voir PROTOCOL.md section 3bis)."""
-    for suffix, type_char, value in snmp_params:
-        snmp_set(suffix, type_char, value)
-    snmp_set(".12.0", "i", "2")
-    log("commande SNMP GO envoyee")
-
-
-def reset_snmp_state():
-    try:
-        snmp_set(".12.0", "i", "1")
-    except Exception as e:
-        log(f"reset_snmp_state() erreur (ignoree) : {e!r}")
-
-
-def fetch_scan_jpeg():
-    """Le scan physique (mecanique) prend jusqu'a ~20s avant que l'imprimante commence a
-    envoyer des donnees sur ce port : il faut attendre patiemment le premier octet, puis
-    seulement ensuite basculer sur un timeout court pour detecter la fin du flux."""
-    with socket.create_connection((PRINTER_IP, SCAN_PORT), timeout=15) as s:
-        chunks = []
-        s.settimeout(45)
-        try:
-            while True:
-                chunk = s.recv(65536)
-                if not chunk:
-                    break
-                chunks.append(chunk)
-                s.settimeout(5)  # une fois le flux demarre, 5s d'inactivite = fin
-        except socket.timeout:
-            pass
-        data = b"".join(chunks)
-
-    idx = data.find(b"\xff\xd8\xff\xe0")
-    if idx < 0:
-        raise ValueError(f"marqueur JPEG SOI introuvable ({len(data)} octets recus)")
-    log(f"en-tete proprietaire avant JPEG : {idx} octets")
-    return data[idx:]
-
-
-def save_as_pdf(jpeg_bytes: bytes, mode: str):
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    name = datetime.now().strftime("scan_%Y-%m-%d %H.%M.%S.pdf")
-    dest = OUTPUT_DIR / name
-    img = Image.open(io.BytesIO(jpeg_bytes))
-    if mode == "color":
-        img = img.convert("RGB")
-    elif mode == "gray":
-        img = img.convert("L")
-    elif mode == "bw":
-        # L'imprimante ne distingue pas "niveaux de gris" et "noir et blanc" cote materiel
-        # (voir PROTOCOL.md) : on recoit toujours une image en niveaux de gris, et c'est a
-        # nous de la seuiller en 1-bit pour obtenir un vrai rendu N&B.
-        img = img.convert("L").point(lambda p: 255 if p > BW_THRESHOLD else 0, mode="1")
-    else:
-        raise ValueError(f"mode de scan inconnu : {mode!r}")
-    img.save(dest, "PDF")
-    log(f"scan sauvegarde : {dest} ({len(jpeg_bytes)} octets JPEG, mode={mode})")
+    # Le scan physique (mecanique) + la conversion prennent facilement 30-60s pour un
+    # document dense a 300dpi : timeout genereux, scanservjs ne repond qu'une fois termine.
+    with urllib.request.urlopen(req, timeout=120) as r:
+        response = json.loads(r.read())
+    saved = response.get("file", {}).get("fullname", "?")
+    log(f"scan effectue par scanservjs : {saved}")
 
 
 def main():
-    profiles_desc = ", ".join(f"{HOST_ID}:{p['suffix']} ({p['mode']})" for p in PROFILES)
+    profiles_desc = ", ".join(f"{HOST_ID}:{p['suffix']} ({p['params']['mode']})" for p in PROFILES)
     log(f"demarrage, cible {PRINTER_IP}, destinations : {profiles_desc}")
+    log(f"delegue a scanservjs : {SCANSERVJS_URL} (device={SCANSERVJS_DEVICE_ID!r})")
     ensure_destinations_registered()
     discover()
     log("sequence de decouverte effectuee")
@@ -355,13 +263,8 @@ def main():
             is_new_trigger = matched_suffix is not None and matched_suffix != last_matched_suffix
             last_matched_suffix = matched_suffix
             if is_new_trigger:
-                log(f"scan detecte pour {profile_display(matched)!r} (mode={matched['mode']}), declenchement SNMP...")
-                trigger_scan_via_snmp(matched["snmp"])
-                try:
-                    jpeg_bytes = fetch_scan_jpeg()
-                    save_as_pdf(jpeg_bytes, matched["mode"])
-                finally:
-                    reset_snmp_state()
+                log(f"scan detecte pour {profile_display(matched)!r}, delegation a scanservjs...")
+                trigger_scanservjs_scan(matched)
         except Exception as e:
             log(f"erreur (ignoree, on continue) : {e!r}")
         cycle += 1

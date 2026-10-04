@@ -1,9 +1,9 @@
 # hp3055-scan-bridge
 
 Fait fonctionner le bouton **"Scan" du panneau de controle** d'un HP LaserJet
-3050/3052/3055/3390/3392 vers n'importe quel outil de scan sur reseau local (testé avec
-[scanservjs](https://github.com/sbs20/scanservjs)), **sans** le logiciel HP "Full Solution"
-d'epoque ni la VM Windows 2000 qu'il faut habituellement pour le faire tourner.
+3050/3052/3055/3390/3392 avec [scanservjs](https://github.com/sbs20/scanservjs), **sans** le
+logiciel HP "Full Solution" d'epoque ni la VM Windows 2000 qu'il faut habituellement pour le
+faire tourner.
 
 Ces imprimantes tout-en-un supportent le "scan to PC" declenche depuis leur panneau physique,
 mais ce mecanisme n'a jamais ete documente publiquement par HP et n'a rien a voir avec un
@@ -13,42 +13,72 @@ detail complet (requetes exactes, OID SNMP, structure des trames).
 
 ## Comment ça marche
 
+Ce pont ne fait que la partie que ni SANE ni scanservjs ne savent faire : detecter l'appui du
+bouton panneau (protocole proprietaire HP). Pour l'acquisition du scan elle-meme, il delegue
+a scanservjs via son API HTTP locale, plutot que de reproduire le protocole SNMP de bout en
+bout (voir "Pourquoi deleguer a scanservjs ?" ci-dessous pour la raison).
+
 1. Le script s'enregistre aupres de l'imprimante comme plusieurs "destinations" de scan —
    une par profil couleur/resolution (elles apparaissent toutes dans la liste du panneau,
    l'imprimante n'ayant pas de bouton pour choisir le mode, c'est le choix de destination qui
    en tient lieu).
-2. Il surveille en continu si l'une de ces destinations a ete choisie et le bouton "Scan"
-   presse.
-3. Quand c'est le cas, il envoie la sequence SNMP du profil correspondant, qui declenche
-   reellement le moteur de scan (le simple polling HTTP ne suffit pas — c'est la piece
-   manquante qui a pris le plus de temps a trouver).
-4. Il recupere l'image scannee (JPEG) sur un port TCP dedie, la convertit selon le mode du
-   profil (couleur / niveaux de gris / noir-et-blanc par seuillage logiciel) et la sauvegarde
-   en PDF.
+2. Il surveille en continu (polling HTTP) si l'une de ces destinations a ete choisie et le
+   bouton "Scan" presse.
+3. Quand c'est le cas, il appelle l'API `POST /api/v1/scan` de scanservjs avec le mode et la
+   resolution du profil correspondant. scanservjs se charge de tout le reste (declenchement
+   du scan via HPLIP/SANE, recuperation de l'image, conversion, sauvegarde) exactement comme
+   si l'utilisateur avait clique sur "Scan" dans l'interface web.
+
+### Pourquoi deleguer a scanservjs plutot que de tout reproduire soi-meme ?
+
+Une premiere version de ce pont reproduisait elle-meme toute la sequence SNMP de
+declenchement et recuperait le JPEG brut directement sur le port TCP 8290 de l'imprimante
+(toujours documentee dans `PROTOCOL.md`, au cas ou ce pont serait utile sans scanservjs). Elle
+fonctionnait, mais produisait des scans corrompus sur des documents denses (texte serre,
+photos detaillees) — tres probablement un defaut du firmware de l'imprimante specifique a ce
+chemin "push" historique, puisque scanservjs (qui passe par HPLIP/SANE, un chemin "pull"
+completement distinct pour le meme materiel) ne montre jamais ce probleme, meme sur les memes
+documents. Autant s'appuyer sur un chemin d'acquisition deja fiable plutot que de continuer a
+debugger un protocole proprietaire non documente.
+
+C'est aussi l'architecture que les mainteneurs de projets voisins recommandent pour ce genre
+de probleme : un demon externe et decouple qui detecte l'evenement specifique au materiel,
+puis delegue l'acquisition a l'outil de scan generique via son API — voir la discussion
+[scanservjs#281](https://github.com/sbs20/scanservjs/issues/281) et
+[sane-airscan#261](https://github.com/alexpevzner/sane-airscan/issues/261) (meme probleme
+pour du materiel plus recent, WSD/eSCL, meme conclusion independante).
 
 ## Prerequis
 
-- Python 3 + [Pillow](https://pypi.org/project/Pillow/) (`pip install pillow` ou paquet
-  systeme `python3-pil`)
-- `snmpset`/`snmpget` (paquet `snmp` sur Debian/Ubuntu, `net-snmp` ailleurs)
+- Python 3 (aucune dependance tierce : seulement la bibliotheque standard)
+- Une instance de [scanservjs](https://github.com/sbs20/scanservjs) deja configuree et
+  fonctionnelle pour cette imprimante (le pont ne fait qu'appeler son API, il ne scanne
+  jamais lui-meme)
 - Etre sur le meme reseau local que l'imprimante (protocole non authentifie, prevu pour du
   LAN de confiance)
 
 ## Configuration
 
-Les parametres de connexion se reglent via variables d'environnement :
+Variables d'environnement :
 
 | Variable | Defaut | Description |
 |---|---|---|
 | `PRINTER_IP` | `192.168.1.2` | IP de l'imprimante |
 | `HOST_ID` | `MYPC` | Doit correspondre au **nom NetBIOS reel** de la machine qui lance le script (l'imprimante semble le resoudre par NBNS avant d'accepter le scan) |
-| `OUTPUT_DIR` | `./output` | Dossier ou sont deposes les PDF generes |
-| `SNMP_COMMUNITY` | `internal` | Communaute SNMP (valeur observee sur le modele teste) |
+| `SCANSERVJS_URL` | `http://127.0.0.1:8080` | URL de base de l'API scanservjs (le pont tourne generalement sur la meme machine que scanservjs) |
+| `SCANSERVJS_DEVICE_ID` | *(vide, requis)* | Identifiant du device tel qu'expose par scanservjs — voir ci-dessous |
+
+Pour trouver `SCANSERVJS_DEVICE_ID` :
+```bash
+curl -s http://127.0.0.1:8080/api/v1/context | python3 -m json.tool | grep '"id"'
+# ex: "id": "hpaio:/net/HP_LaserJet_3055?ip=192.168.11.131"
+```
 
 ```bash
 export PRINTER_IP=192.168.1.50
 export HOST_ID=$(hostname | tr a-z A-Z)
-export OUTPUT_DIR=/srv/scans
+export SCANSERVJS_URL=http://127.0.0.1:8080
+export SCANSERVJS_DEVICE_ID='hpaio:/net/HP_LaserJet_3055?ip=192.168.1.50'
 python3 hp3055_scan_bridge.py
 ```
 
@@ -60,33 +90,27 @@ c'est le choix de la destination qui en tient lieu. Chaque destination apparait 
 sous le nom `<HOST_ID>:<suffix>` (le panneau du 3055 n'affiche que 9 caracteres visibles
 apres le HostID, d'ou des suffixes courts).
 
-Profils fournis par defaut (valeurs SNMP calibrees et testees sur un HP LaserJet 3055, voir
-`PROTOCOL.md` pour le detail des essais) :
+Profils fournis par defaut, chacun passe tel quel a l'API scanservjs :
 
-| Suffixe | Mode | Resolution |
+| Suffixe | `mode` (scanservjs) | Resolution |
 |---|---|---|
-| `COLOR200` | Couleur | 200 dpi |
-| `GRAY300` | Niveaux de gris | 300 dpi |
-| `BW300` | Noir et blanc (seuillage logiciel) | 300 dpi |
+| `COLOR200` | `Color` | 200 dpi |
+| `GRAY300` | `Gray` | 300 dpi |
+| `BW300` | `Lineart` | 300 dpi |
 
-L'imprimante ne distingue que 2 modes materiels (`.3.0` = `8` niveaux de gris / `24`
-couleur) — il n'existe pas de 3e reglage materiel pour le "noir et blanc" : le profil
-`BW300` recoit la meme image en niveaux de gris que `GRAY300`, mais le script la seuille
-lui-meme en 1-bit avant de l'enregistrer (constante `BW_THRESHOLD`, 128 par defaut).
-
-Pour ajouter/modifier un profil, editer la liste `PROFILES` dans le script — ce ne sont pas
-des parametres libres mais des combinaisons calibrees d'apres des captures reseau reelles
-(voir `PROTOCOL.md` pour les valeurs confirmees a d'autres resolutions).
+`mode` doit correspondre a une des valeurs exposees par le backend SANE du device (champ
+`--mode` dans `/api/v1/context`) ; `pipeline` doit correspondre a une des valeurs de
+`devices[].settings.pipeline.options` du meme endpoint (controle le format de sortie —
+PDF/JPG/PNG/TIFF, qualite, OCR...). Pour ajouter/modifier un profil, editer la liste
+`PROFILES` dans le script.
 
 Le script tourne en boucle indefiniment (`Ctrl+C` pour arreter), et journalise chaque etape
 sur stdout. Pour un fonctionnement permanent, en faire un service systemd (`Restart=always`).
 
 ## Limitations connues
 
-- Seuls 3 profils couleur/resolution sont calibres par defaut (voir ci-dessus) ; en ajouter
-  d'autres necessite d'editer le script, pas seulement une variable d'environnement.
-- Le niveau de compression JPEG (taille de fichier) n'est pas pilotable : confirme pilote par
-  l'imprimante elle-meme mais via un mecanisme encore non identifie (voir `PROTOCOL.md`).
+- Necessite scanservjs deja installe et fonctionnel pour cette imprimante — ce pont n'est pas
+  un outil de scan autonome, juste le detecteur de bouton manquant.
 - Non teste avec le bac d'alimentation automatique (ADF) multi-pages.
 - Testé sur un HP LaserJet 3055 ; les autres modeles de la meme gamme partagent
   vraisemblablement le meme firmware/moteur, mais ce n'est pas confirme.
