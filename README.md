@@ -90,19 +90,45 @@ c'est le choix de la destination qui en tient lieu. Chaque destination apparait 
 sous le nom `<HOST_ID>:<suffix>` (le panneau du 3055 n'affiche que 9 caracteres visibles
 apres le HostID, d'ou des suffixes courts).
 
-Profils fournis par defaut, chacun passe tel quel a l'API scanservjs :
+Profils fournis par defaut, chacun passe tel quel a l'API scanservjs. Format fixe a A4
+(210x297mm, voir constante `A4_MM`) pour les 6 — les autres formats restent accessibles via
+l'interface web de scanservjs, qui propose le choix a chaque scan :
 
-| Suffixe | `mode` (scanservjs) | Resolution |
-|---|---|---|
-| `COLOR200` | `Color` | 200 dpi |
-| `GRAY300` | `Gray` | 300 dpi |
-| `BW300` | `Lineart` | 300 dpi |
+| Suffixe | `mode` (scanservjs) | Resolution | Pipeline / qualite |
+|---|---|---|---|
+| `COLOR200` | `Color` | 200 dpi | PDF (JPG, qualite 75) |
+| `COLOR300` | `Color` | 300 dpi | PDF (JPG, qualite 92) |
+| `GRAY200` | `Gray` | 200 dpi | PDF (JPG, qualite 75) |
+| `GRAY300` | `Gray` | 300 dpi | PDF (JPG, qualite 92) |
+| `BW300` | `Lineart` | 300 dpi | PDF (TIFF, compression LZW) |
+| `PDF_OCR` | `Lineart` | 300 dpi | PDF (JPG qualite 92) + calque de texte OCR (Tesseract) |
+
+`PDF_OCR` produit un PDF dont le rendu visuel reste une image (comme les autres profils),
+mais avec un calque de texte invisible superpose, genere par Tesseract — texte
+selectionnable/cherchable sans changer l'apparence de la page. La langue OCR est configuree
+via la variable d'environnement `OCR_LANG` du conteneur scanservjs (pas du bridge), par
+exemple `OCR_LANG=fra` pour du francais — voir la config scanservjs elle-meme, hors scope de
+ce depot.
 
 `mode` doit correspondre a une des valeurs exposees par le backend SANE du device (champ
 `--mode` dans `/api/v1/context`) ; `pipeline` doit correspondre a une des valeurs de
 `devices[].settings.pipeline.options` du meme endpoint (controle le format de sortie —
 PDF/JPG/PNG/TIFF, qualite, OCR...). Pour ajouter/modifier un profil, editer la liste
 `PROFILES` dans le script.
+
+**Pourquoi `BW300` utilise un pipeline different (TIFF/LZW, pas JPEG)** : JPEG compresse mal
+du contenu 1-bit (texte en noir et blanc pur) — testé sur un document reel : ~1 Mo en JPEG
+contre ~192 Ko en TIFF/LZW pour un resultat visuellement identique. La vraie compression
+bitonale (CCITT Group 4, ~140 Ko sur le meme test) serait encore meilleure mais necessiterait
+un pipeline personnalise dans la configuration scanservjs (`config.local.js`), non fait ici
+pour rester avec les pipelines standard.
+
+**Destinations volatiles** : une fois enregistree, une destination reste visible au panneau
+jusqu'au prochain redemarrage de l'imprimante — y compris une destination qu'un profil
+supprime de `PROFILES` (le pont n'enregistre jamais de destination absente de la liste mais
+ne desenregistre pas non plus celles qui y etaient avant ; aucun mecanisme de suppression HTTP
+n'a ete trouve malgre plusieurs tentatives, voir `PROTOCOL.md`). Pour nettoyer une destination
+obsolete du panneau, redemarrer l'imprimante.
 
 Le script tourne en boucle indefiniment (`Ctrl+C` pour arreter), et journalise chaque etape
 sur stdout. Pour un fonctionnement permanent, en faire un service systemd (`Restart=always`).

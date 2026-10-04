@@ -58,21 +58,53 @@ POLL_INTERVAL_S = 5
 # /api/v1/context) : pour HPLIP/hpaio, "Lineart"|"Gray"|"Color". Le pipeline choisit le format
 # de sortie ; voir la liste complete des pipelines dans /api/v1/context, champ
 # devices[].settings.pipeline.options.
+#
+# width/height = A4 (mm) pour les 3 profils : le bouton panneau ne propose pas de choix de
+# format, on fixe donc A4 une fois pour toutes ici. Les formats differents restent possibles
+# via l'interface web de scanservjs directement (qui offre le choix du format a chaque scan).
+#
+# Pipeline JPEG pour COLOR200/GRAY300 (contenu en tons continus, JPEG adapte). Pipeline TIFF
+# LZW pour BW300/Lineart : un pipeline JPEG sur du contenu 1-bit est a la fois inadapte
+# (JPEG ne sait pas representer du 1-bit nativement, les transitions nettes noir/blanc du
+# texte produisent des artefacts et un fichier bien plus gros que necessaire — ~1 Mo observe)
+# et moins efficace qu'une vraie compression bitonale. scanservjs n'offre pas de pipeline
+# PDF+CCITT G4 tout fait dans sa liste standard ; LZW est le meilleur compromis disponible
+# sans ajouter de pipeline personnalise (teste : G4 ~140 Ko, LZW ~192 Ko, JPEG ~1037 Ko, sur
+# le meme document). Choix deja identifie independamment dans la config scanservjs locale de
+# cette installation (voir /opt/scanservjs/cfg/config.local.js sur tram), garde coherent ici.
+A4_MM = {"width": 210, "height": 297}
 PROFILES = [
     {
         "suffix": "COLOR200",
-        "params": {"mode": "Color", "resolution": 200},
+        "params": {"mode": "Color", "resolution": 200, **A4_MM},
+        "pipeline": "PDF (JPG | @:pipeline.medium-quality)",
+    },
+    {
+        "suffix": "COLOR300",
+        "params": {"mode": "Color", "resolution": 300, **A4_MM},
+        "pipeline": "PDF (JPG | @:pipeline.high-quality)",
+    },
+    {
+        "suffix": "GRAY200",
+        "params": {"mode": "Gray", "resolution": 200, **A4_MM},
         "pipeline": "PDF (JPG | @:pipeline.medium-quality)",
     },
     {
         "suffix": "GRAY300",
-        "params": {"mode": "Gray", "resolution": 300},
-        "pipeline": "PDF (JPG | @:pipeline.medium-quality)",
+        "params": {"mode": "Gray", "resolution": 300, **A4_MM},
+        "pipeline": "PDF (JPG | @:pipeline.high-quality)",
     },
     {
         "suffix": "BW300",
-        "params": {"mode": "Lineart", "resolution": 300},
-        "pipeline": "PDF (JPG | @:pipeline.medium-quality)",
+        "params": {"mode": "Lineart", "resolution": 300, **A4_MM},
+        "pipeline": "PDF (TIF | @:pipeline.lzw-compressed)",
+    },
+    {
+        "suffix": "PDF_OCR",
+        "params": {"mode": "Lineart", "resolution": 300, **A4_MM},
+        # PDF image (JPEG qualite 92) + calque de texte invisible (Tesseract, langue via
+        # OCR_LANG sur le conteneur scanservjs — configure en francais sur cette install).
+        "pipeline": "@:pipeline.ocr | PDF (JPG | @:pipeline.high-quality)",
     },
 ]
 
